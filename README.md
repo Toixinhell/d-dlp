@@ -30,3 +30,27 @@ history of a Discord text channel.
 
 3. Fill in your token, channel ID, destination directory and the desired
    backup mode, then click **Start backup**.
+
+## Building a standalone executable
+
+The repository includes a helper script that wraps [PyInstaller] so you can
+create a single-file executable of the GUI.  This is handy when you want to
+start the program without invoking Python manually.
+
+1. Install the additional build dependency:
+
+   ```bash
+   python -m pip install pyinstaller
+   ```
+
+2. Run the build helper from the repository root:
+
+   ```bash
+   python build_executable.py
+   ```
+
+3. The generated binary will be available in the `dist/` directory (for
+   example `dist/discord-backup-gui` on Linux and `dist/discord-backup-gui.exe`
+   on Windows).  You can copy that file anywhere and run it directly.
+
+[PyInstaller]: https://pyinstaller.org
