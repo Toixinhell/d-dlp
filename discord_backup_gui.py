@@ -4,7 +4,7 @@ This module provides a Tkinter based interface that allows a user to:
 
 * Authenticate with a Discord bot or user token.
 * Choose the channel that should be archived.
-* Decide whether to export only message text, only images, or both.
+* Decide whether to export only message text, only media (images and videos), or both.
 * Select the directory where the export will be created.
 
 The implementation intentionally sticks to the HTTP REST API instead of a
@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional
+from typing import Dict, Iterable, List, Literal, Optional, Sequence, Tuple
 
 import requests
 import tkinter as tk
@@ -31,7 +33,93 @@ from tkinter.scrolledtext import ScrolledText
 
 DISCORD_API_ROOT = "https://discord.com/api/v10"
 
-BackupMode = Literal["text", "images", "both"]
+BackupMode = Literal["text", "media", "both"]
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpeg", ".mpg"}
+
+TOKEN_PATTERNS: Sequence[re.Pattern[str]] = (
+    re.compile(r"mfa\.[\w-]{20,}"),
+    re.compile(r"[\w-]{24}\.[\w-]{6}\.[\w-]{27}"),
+)
+
+
+def discover_discord_tokens() -> List[Tuple[str, str]]:
+    """Collect likely Discord tokens from the environment and desktop client caches."""
+
+    candidates: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+
+    env_token = os.environ.get("DISCORD_TOKEN", "").strip()
+    if env_token:
+        candidates.append((env_token, "environment variable DISCORD_TOKEN"))
+        seen.add(env_token)
+
+    for leveldb_dir in _discord_leveldb_paths():
+        for token in _extract_tokens_from_leveldb(leveldb_dir):
+            if token not in seen:
+                candidates.append((token, str(leveldb_dir)))
+                seen.add(token)
+
+    return candidates
+
+
+def _discord_leveldb_paths() -> Iterable[Path]:
+    roots: List[Path] = []
+
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            roots.append(Path(appdata))
+    elif sys.platform == "darwin":
+        roots.append(Path.home() / "Library" / "Application Support")
+    else:
+        roots.extend([
+            Path.home() / ".config",
+            Path.home() / ".var" / "app" / "com.discordapp.Discord" / "config",
+            Path.home() / ".var" / "app" / "dev.vencord.Vesktop" / "config",
+        ])
+
+    folder_names = (
+        "discord",
+        "Discord",
+        "discordcanary",
+        "DiscordCanary",
+        "discordptb",
+        "DiscordPTB",
+        "Vencord",
+        "vencord",
+        "VencordDesktop",
+        "vencorddesktop",
+        "Vesktop",
+        "vesktop",
+    )
+
+    for root in roots:
+        for name in folder_names:
+            leveldb_dir = root / name / "Local Storage" / "leveldb"
+            if leveldb_dir.is_dir():
+                yield leveldb_dir
+
+
+def _extract_tokens_from_leveldb(directory: Path) -> Iterable[str]:
+    tokens: List[str] = []
+    for suffix in ("*.ldb", "*.log"):
+        for file_path in directory.glob(suffix):
+            tokens.extend(_extract_tokens_from_file(file_path))
+    return tokens
+
+
+def _extract_tokens_from_file(file_path: Path) -> List[str]:
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+
+    found: List[str] = []
+    for pattern in TOKEN_PATTERNS:
+        found.extend(pattern.findall(content))
+    return found
 
 
 class DiscordAPIError(RuntimeError):
@@ -96,8 +184,10 @@ class DiscordBackupClient:
 
             params["before"] = payload[-1]["id"]
 
-    def download_attachment(self, attachment: Dict[str, object], directory: Path) -> Optional[Path]:
-        """Download the attachment if it looks like an image.
+    def download_attachment(
+        self, attachment: Dict[str, object], directory: Path
+    ) -> Optional[Path]:
+        """Download the attachment if it looks like an image or video.
 
         Returns the local file path if the attachment is downloaded, otherwise
         ``None``.
@@ -105,12 +195,9 @@ class DiscordBackupClient:
 
         url = attachment.get("url")
         filename = attachment.get("filename")
-        content_type = attachment.get("content_type", "")
+        media_kind = self._attachment_media_kind(attachment)
 
-        if not url or not filename:
-            return None
-
-        if content_type and not str(content_type).startswith("image/"):
+        if not url or not filename or media_kind is None:
             return None
 
         target = directory / filename
@@ -129,6 +216,20 @@ class DiscordBackupClient:
                 file_handle.write(chunk)
 
         return target
+
+    @staticmethod
+    def _attachment_media_kind(attachment: Dict[str, object]) -> Optional[str]:
+        """Classify the attachment as image/video when possible."""
+
+        content_type = str(attachment.get("content_type") or "").lower()
+        filename = str(attachment.get("filename") or "")
+        suffix = Path(filename).suffix.lower()
+
+        if content_type.startswith("image/") or suffix in IMAGE_EXTENSIONS:
+            return "image"
+        if content_type.startswith("video/") or suffix in VIDEO_EXTENSIONS:
+            return "video"
+        return None
 
     @staticmethod
     def _handle_ratelimit(response: requests.Response) -> None:
@@ -189,7 +290,7 @@ class BackupController:
                 if mode in ("text", "both"):
                     text_records.append(message)
 
-                if mode in ("images", "both") and message.attachments:
+                if mode in ("media", "both") and message.attachments:
                     for attachment in message.attachments:
                         try:
                             downloaded = client.download_attachment(attachment, backup_dir)
@@ -197,7 +298,8 @@ class BackupController:
                             self._async_error(str(error))
                             return
                         if downloaded:
-                            self._async_log(f"Downloaded {downloaded.name}")
+                            kind = client._attachment_media_kind(attachment) or "file"
+                            self._async_log(f"Downloaded {kind}: {downloaded.name}")
 
             if text_records and mode in ("text", "both"):
                 self._write_text_backup(text_records, backup_dir)
@@ -257,8 +359,13 @@ class BackupApp(tk.Tk):
         padding_options = {"padx": 10, "pady": 5, "sticky": "w"}
 
         ttk.Label(self, text="Discord Token:").grid(row=0, column=0, **padding_options)
-        ttk.Entry(self, textvariable=self.token_var, width=60, show="*").grid(
-            row=0, column=1, **padding_options
+        token_frame = ttk.Frame(self)
+        token_frame.grid(row=0, column=1, sticky="we", padx=10, pady=5)
+        ttk.Entry(token_frame, textvariable=self.token_var, width=60, show="*").pack(
+            side=tk.LEFT, fill=tk.X, expand=True
+        )
+        ttk.Button(token_frame, text="Auto-detect", command=self._auto_detect_token).pack(
+            side=tk.LEFT, padx=5
         )
 
         ttk.Label(self, text="Channel ID:").grid(row=1, column=0, **padding_options)
@@ -275,7 +382,11 @@ class BackupApp(tk.Tk):
         ttk.Label(self, text="Backup mode:").grid(row=3, column=0, **padding_options)
         mode_frame = ttk.Frame(self)
         mode_frame.grid(row=3, column=1, sticky="w", padx=10, pady=5)
-        for text, value in ("Text only", "text"), ("Images only", "images"), ("Text and images", "both"):
+        for text, value in (
+            ("Text only", "text"),
+            ("Media only (images & videos)", "media"),
+            ("Text and media", "both"),
+        ):
             ttk.Radiobutton(mode_frame, text=text, value=value, variable=self.mode_var).pack(side=tk.LEFT, padx=5)
 
         ttk.Button(self, text="Start backup", command=self._start_backup).grid(
@@ -300,6 +411,24 @@ class BackupApp(tk.Tk):
             output_dir=output,
             mode=mode,  # type: ignore[arg-type]
         )
+
+    def _auto_detect_token(self) -> None:
+        tokens = discover_discord_tokens()
+        if not tokens:
+            messagebox.showinfo(
+                "Token not found",
+                "Could not auto-detect a Discord token. Please enter it manually.",
+            )
+            self.controller.log("Token auto-detect failed.")
+            return
+
+        token, source = tokens[0]
+        self.token_var.set(token)
+        self.controller.log(f"Loaded token from {source}.")
+
+        if len(tokens) > 1:
+            extra_sources = ", ".join(src for _value, src in tokens[1:])
+            self.controller.log(f"Additional tokens detected from: {extra_sources}")
 
 
 def main() -> None:

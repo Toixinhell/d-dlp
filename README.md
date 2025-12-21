@@ -5,9 +5,9 @@ history of a Discord text channel.
 
 ## Features
 
-* Choose between saving **text only**, **image attachments only**, or **both**.
+* Choose between saving **text only**, **media only** (images and videos), or **both**.
 * Uses the Discord REST API so it runs on-demand without gateway intents.
-* Stores message content in `messages.json` and downloads images into the
+* Stores message content in `messages.json` and downloads attachments into the
   selected output directory.
 
 > **Note:** exporting chats requires a valid Discord bot token with the
