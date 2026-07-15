@@ -16,10 +16,10 @@ history of a Discord text channel.
 
 ## Running the app
 
-1. Install the single dependency:
+1. Install the Python dependency:
 
    ```bash
-   python -m pip install requests
+   python -m pip install -r requirements.txt
    ```
 
 2. Start the GUI:
@@ -28,8 +28,20 @@ history of a Discord text channel.
    python discord_backup_gui.py
    ```
 
-3. Fill in your token, channel ID, destination directory and the desired
+3. If you are running from the VSCodium Flatpak terminal, start it through the
+   host Python so Tkinter can load the host GUI libraries:
+
+   ```bash
+   flatpak-spawn --host /usr/bin/python3 /home/toix/Documents/github/d-dlp/discord_backup_gui.py
+   ```
+
+4. Fill in your token, channel ID, destination directory and the desired
    backup mode, then click **Start backup**.
+
+Tkinter is part of the Python standard library, but Linux distributions package
+its native GUI libraries separately. If `import tkinter` fails outside Flatpak,
+install your distribution's Tkinter package, for example `python3-tk` on
+Debian/Ubuntu.
 
 ## Building a standalone executable
 
